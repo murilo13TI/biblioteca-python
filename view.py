@@ -1,10 +1,36 @@
-from flask import Flask, jsonify, request
+import threading
+
+import cursor
+import jwt
+from flask import Flask, jsonify, request, Response
+import pygal
+from config import SECRET_KEY
 from main import app, con
-from funcao import verificar_senha
 from flask_bcrypt import generate_password_hash, check_password_hash
+from funcao import verificar_senha
+from funcao import gerar_token
+from funcao import remover_bearer
+from funcao import enviando_email
+from fpdf import FPDF
+from flask import send_file
+
 
 @app.route('/listar_livro', methods=['GET'])
 def listar_livro():
+    token = request.headers.get('authorization')
+    if not token:
+        return jsonify({'mensage:"token de autentificação necessário'}), 401
+
+    token = remover_bearer(token)
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
+        id_usuario = payload['id_usuario']
+    except jwt.ExpiredSignatureError:
+        return jsonify({"message":"Token expirado"}),401
+    except jwt.InvalidTokenError:
+        return jsonify({"message":"Token invalido"}),401
+
     try:
         cur = con.cursor()
         cur.execute('SELECT id_livro, nome_livro, autor, ano_publicado FROM livro')
@@ -148,7 +174,7 @@ def cadastro():
     finally:
         cur.close()
 
-@app.route('/login', methods=['GET'])
+@app.route('/login', methods=['POST'])
 def login():
     cur = con.cursor()
     try:
@@ -157,23 +183,33 @@ def login():
         email = dados.get('email')
         senha = dados.get('senha')
 
-        cur.execute("select id_usuario , nome , email, senha from usuario where = ?", (email,))
+        cur.execute(
+            "SELECT id_usuario, nome_usuario, email, senha FROM usuario WHERE email = ?",
+            (email,)
+        )
 
+        usuario = cur.fetchone()
 
-        if email != email and check_password_hash(senha) != senha:
-            return jsonify({'error': 'O email ou a senha não se coincidem'})
+        if not usuario:
+            return jsonify({'message': 'Usuário não encontrado'}), 404
 
-        con.close()
+        id_usuario = usuario[0]
+        senha_hash = usuario[3]
 
-        if email == email and check_password_hash(senha) == senha:
-            return jsonify({'message':'Usuário logado com sucesso'})
-            cur.close()
+        if check_password_hash(senha_hash, senha):
+            token = gerar_token(id_usuario)
+            return jsonify({
+                'message': 'Usuário logado com sucesso',
+                'token': token
+            }), 200
+
+        return jsonify({'message': 'Dados incorretos'}), 401
 
     except Exception as e:
-        return jsonify({'error':'Não conseguimos logar a conta'})
-    finally:
-        con.close()
+        return jsonify({'error': f'Não conseguimos logar a conta {e}'}), 500
 
+    finally:
+        cur.close()
 @app.route('/edita_usuario', methods=['PUT'])
 def editar_usuario(id):
 
@@ -222,5 +258,69 @@ def deletar_usuario():
 
     return jsonify({"message": "Usuario deletado com sucesso!", 'id_usuario': id})
 
+@app.route('/gerar_pdf' ,methods=["get"])
+def gerar_pdf():
+    try:
+        cur = con.cursor()
+        cur.execute("SELECT id_usuario, nome_usuario, email, senha FROM usuario")
+        usuario = cur.fetchall()
+        cur.close()
 
+        pdf = FPDF()
+        pdf.set_auto_page_break(auto=True, margin=15)
+        pdf.add_page()
+        pdf.set_font("Arial", style='B', size=16)
+        pdf.cell(200, 10, "Relatorio de usuário", ln=True, align='C')
+        pdf.ln(5)  # Espaço entre o título e a linha
+        pdf.line(10, pdf.get_y(), 200, pdf.get_y())  # Linha abaixo do título
+        pdf.ln(5)  # Espaço após a linha
+        pdf.set_font("Arial", size=12)
+        for usuario in usuario:
+            pdf.cell(200, 10, f"ID: {usuario[0]} - {usuario[1]} - {usuario[2]} - {usuario[3]}", ln=True)
+        contador_usuario = len(usuario)
+        pdf.ln(10)  # Espaço antes do contador
+        pdf.set_font("Arial", style='B', size=12)
+        pdf.cell(200, 10, f"Total de usuários cadastrados: {contador_usuario}", ln=True, align='C')
+        pdf_path = "relatorio_usuario.pdf"
+        pdf.output(pdf_path)
+        return send_file(pdf_path, as_attachment=True, mimetype='application/pdf')
 
+    except Exception as e:
+        return jsonify({'message': f'Erro ao consultar o banco de dados: {e}'}), 500
+    finally:
+       cur.close()
+
+@app.route('/gerar_grafico', methods=['GET'])
+def gerar_grafico():
+    try:
+        cur = con.cursor()
+        cur.execute("""
+        select ano_publicado, count(*) 
+        from livro 
+        group by ano_publicado 
+        order by ano_publicado 
+        """)
+        graficos = cur.fetchall()
+
+        grafico = pygal.Bar()
+        grafico.title = 'Grafico de livros'
+
+        for linha in graficos:
+            grafico.add(str(linha[0]), linha[1])
+        return Response(grafico.render(), mimetype='image/svg+xml')
+
+    except Exception as e:
+        return jsonify({'message': f'Erro ao consultar o banco de dados {e}'}), 500
+    finally:
+        cur.close()
+
+@app.route('/enviar_email', methods=['POST'])
+def enviar_email():
+    dados = request.json
+    destinatario = dados.get('to')
+    assunto = dados.get('subject')
+    mensagem = dados.get('message')
+    thread = threading.Thread(target=enviando_email, args=(destinatario, assunto, mensagem))
+    thread.start()
+
+    return jsonify({'message': 'Email enviado com sucesso!'}) , 200
