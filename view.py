@@ -1,30 +1,32 @@
 import threading
-
-import cursor
+import  os
 import jwt
-from flask import Flask, jsonify, request, Response
+from flask import Flask, jsonify, request, Response, make_response
 import pygal
-from config import SECRET_KEY
+
 from main import app, con
 from flask_bcrypt import generate_password_hash, check_password_hash
-from funcao import verificar_senha
-from funcao import gerar_token
-from funcao import remover_bearer
-from funcao import enviando_email
+from funcao import verificar_senha, gerar_token, remover_bearer, enviando_email
 from fpdf import FPDF
 from flask import send_file
+
+senha = app.config['SECRET_KEY']
+
+
+if not os.path.exists(app.config['UPLOAD_FOLDER']):
+    os.makedirs(app.config['UPLOAD_FOLDER'])
 
 
 @app.route('/listar_livro', methods=['GET'])
 def listar_livro():
     token = request.headers.get('authorization')
     if not token:
-        return jsonify({'mensage:"token de autentificação necessário'}), 401
+        return jsonify({'menssage':'token de autentificação necessário'}), 401
 
     token = remover_bearer(token)
 
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
+        payload = jwt.decode(token, senha, algorithms=['HS256'])
         id_usuario = payload['id_usuario']
     except jwt.ExpiredSignatureError:
         return jsonify({"message":"Token expirado"}),401
@@ -56,70 +58,86 @@ def listar_livro():
     finally:
         con.close()
 
+
 @app.route('/criar_livro', methods=['POST'])
 def criar_livro():
+    # token = request.headers.get("Authorization")
+    token = request.cookies.get("access_token")
+
+    if not token:
+        return jsonify({"erro": "Token necessário"}), 401
+
+    token = remover_bearer(token)
+
     try:
-        dados = request.get_json()
+        jwt.decode(
+            token,
+            app.config['SECRET_KEY'],
+            algorithms=['HS256']
+        )
+    except jwt.ExpiredSignatureError:
+        return jsonify({'mensagem': 'Token expirado'}), 401
+    except jwt.InvalidTokenError:
+        return jsonify({'mensagem': 'Token inválido'}), 401
 
-        nome_livro = dados.get('nome_livro')
-        autor = dados.get('autor')
-        ano_publicado = dados.get('ano_publicacao')
-
-        cur = con.cursor()
-
-        cur.execute('select 1 from livro where nome_livro = ?', (nome_livro,))
-        if cur.fetchone():
-            return jsonify({'error':'Livro já cadastrado'}), 400
-
-        cur.execute("""insert into livro(nome_livro, autor, ano_publicado)
-        values(?,?,?) """, (nome_livro, autor, ano_publicado))
-
-        con.commit()
-        return jsonify({
-            'message': "Livro cadastrado com sucesso?",
-            'livro': {
-                'nome_livro': nome_livro,
-                'autor': autor,
-                'ano_publicado': ano_publicado
-            }
-        }), 201
-    except Exception as e:
-
-        return jsonify({'message': 'Erro ao criar o livro'}), 500
-    finally:
-        con.close()
-
-@app.route('/editar_livro/<int:id>', methods=['PUT'])
-def editar_livro(id):
     cur = con.cursor()
-    cur.execute("""select id_livro, nome_livro, autor, ano_publicado
-                     from livro 
-                     where id_livro = ?""", (id,))
-    tem_livro = cur.fetchone()
 
-    if not tem_livro:
+    try:
+        titulo = request.form.get("titulo")
+        autor = request.form.get("autor")
+        ano_publicacao = request.form.get("ano_publicacao")
+        imagem = request.files.get("imagem")
+
+        if not titulo or not autor or not ano_publicacao:
+            return jsonify({"erro": "Campos obrigatórios"}), 400
+
+        cur.execute(
+            "INSERT INTO livro (nome_livro, autor, ano_publicado) VALUES (?, ?, ?) RETURNING id_livro",
+            (titulo, autor, ano_publicacao)
+        )
+        id_livro = cur.fetchone()[0]
+        con.commit()
+
+        if imagem:
+            pasta = os.path.join(app.config['UPLOAD_FOLDER'], "livros")
+            os.makedirs(pasta, exist_ok=True)
+            nome = f"{id_livro}.jpg"
+            caminho = os.path.join(pasta, nome)
+            imagem.save(caminho)
+
+        return jsonify({
+            "mensagem": "Livro criado",
+            "id_livro": id_livro
+        }), 201
+
+    except Exception as e:
+        con.rollback()
+        return jsonify({"erro": str(e)}), 500
+    finally:
         cur.close()
-        return jsonify({"error": "Livro não encontrado"}), 404
 
-    dados = request.get_json()
-    nome_livro = dados.get('nome_livro')
-    autor = dados.get('autor')
-    ano_publicado = dados.get('ano_publicado')
 
-    cur.execute("""update livro set nome_livro = ?, autor = ? , ano_publicado = ? where id_livro = ?""",
-                (nome_livro, autor, ano_publicado, id))
+
+@app.route('/livro/<int:id>', methods=['PUT'])
+def editar_livro(id):
+    data = request.get_json() or {}
+    titulo = data.get("titulo")
+    autor = data.get("autor")
+    ano = data.get("ano_publicacao")
+
+    cur = con.cursor()
+
+    cur.execute("""
+        UPDATE livro
+        SET nome_livro=?, autor=?, ano_publicado=?
+        WHERE id_livro=?
+    """, (titulo, autor, ano, id))
 
     con.commit()
     cur.close()
 
-    return jsonify({"message": "Livro atualizado com sucesso!",
-                    "livro": {
-                    "id_livro": id,
-                    "nome_livro": nome_livro,
-                    "autor": autor,
-                    "ano_publicado": ano_publicado
-                    }
-                    })
+    return jsonify({"mensagem": "Livro atualizado"})
+
 
 @app.route('/deletar_livro/<int:id>', methods=['DELETE'])
 def deletar_livro(id):
@@ -173,7 +191,6 @@ def cadastro():
 
     finally:
         cur.close()
-
 @app.route('/login', methods=['POST'])
 def login():
     cur = con.cursor()
@@ -198,10 +215,20 @@ def login():
 
         if check_password_hash(senha_hash, senha):
             token = gerar_token(id_usuario)
-            return jsonify({
-                'message': 'Usuário logado com sucesso',
-                'token': token
-            }), 200
+
+            resp = make_response(jsonify({'mensagem': "Logado com sucesso!"}), 200)
+
+            resp.set_cookie(
+                "access_token",
+                token,
+                httponly=True,
+                secure=False,
+                samesite="Lax",
+                path="/",
+                max_age=3600
+            )
+
+            return resp
 
         return jsonify({'message': 'Dados incorretos'}), 401
 
@@ -210,7 +237,8 @@ def login():
 
     finally:
         cur.close()
-@app.route('/edita_usuario', methods=['PUT'])
+
+@app.route('/edita_usuario/<int:id_usuario>', methods=['PUT'])
 def editar_usuario(id):
 
     cur = con.cursor()
@@ -243,7 +271,7 @@ def editar_usuario(id):
                         }
                         })
 
-@app.route('/deletar_usuario', methods=['DELETE'])
+@app.route('/deletar_usuario/<int:id_usuario>', methods=['DELETE'])
 def deletar_usuario():
     cur = con.cursor()
 
@@ -289,6 +317,34 @@ def gerar_pdf():
         return jsonify({'message': f'Erro ao consultar o banco de dados: {e}'}), 500
     finally:
        cur.close()
+
+
+@app.route('/usuario/<int:id>', methods=['PUT'])
+def atualizar_usuario(id):
+    dados = request.get_json() or {}
+
+    senha_hash = generate_password_hash(
+        dados["senha"]
+    ).decode("utf-8")
+
+    cur = con.cursor()
+
+    cur.execute("""
+        UPDATE usuario
+        SET nome=?, usuario=?, senha=?
+        WHERE id=?
+    """, (
+        dados["nome"],
+        dados["usuario"],
+        senha_hash,
+        id
+    ))
+
+    con.commit()
+    cur.close()
+
+    return jsonify({"mensagem": "Usuário atualizado"})
+
 
 @app.route('/gerar_grafico', methods=['GET'])
 def gerar_grafico():

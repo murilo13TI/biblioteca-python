@@ -1,19 +1,29 @@
 from flask import Flask
 import fdb
+from fpdf import FPDF
+from flask_bcrypt import generate_password_hash, check_password_hash
+from flask_cors import CORS
+
+
 
 app = Flask(__name__)
-app.config.from_pyfile('config.py')
-
+CORS(app, origins='*')
+app.config.from_pyfile('Config.py')
 host = app.config['DB_HOST']
 database = app.config['DB_NAME']
 user = app.config['DB_USER']
 password = app.config['DB_PASSWORD']
 
 try:
-    con = fdb.connect(host=host, database=database, user=user,password=password)
-    print('Conectado')
+    con = fdb.connect(
+        host=host,
+        database=database,
+        user=user,
+        password=password
+    )
+    print('Conexão foi um sucesso')
 except Exception as e:
-    print('erro')
+    print(f"Erro na conexão: {e}")
 
 from view import *
 
